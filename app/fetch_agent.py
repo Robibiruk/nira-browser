@@ -134,8 +134,50 @@ def _wikipedia_summary(task: str) -> str | None:
     return None
 
 
+def _tavily_search_html(task: str) -> tuple[str, str] | None:
+    """If TAVILY_API_KEY is set, use Tavily (works from datacenter IPs and
+    returns clean, parseable results). Returns (html, url) or None."""
+    import os
+
+    key = os.getenv("TAVILY_API_KEY")
+    if not key:
+        return None
+    try:
+        with httpx.Client(timeout=25.0) as client:
+            resp = client.post(
+                "https://api.tavily.com/search",
+                headers={"Authorization": f"Bearer {key}"},
+                json={
+                    "api_key": key,
+                    "query": task,
+                    "search_depth": "basic",
+                    "max_results": 6,
+                    "include_answer": False,
+                },
+            )
+        if resp.status_code in (401, 403):
+            return None
+        resp.raise_for_status()
+        data = resp.json()
+        results = data.get("results", []) or []
+        parts = []
+        for i, r in enumerate(results[:6], 1):
+            title = r.get("title", "")
+            url = r.get("url", "")
+            content = (r.get("content") or "").strip()
+            parts.append(f'{i}. <a href="{url}">{title}</a>\n   {content}')
+        html = "<html><body>Search results:\n" + "\n".join(parts) + "</body></html>"
+        return html, "tavily-search"
+    except Exception:
+        return None
+
+
 def _fetch_search(task: str) -> tuple[str, str]:
-    """Try each search engine until one responds with HTML. Returns (html, url)."""
+    """Search chain: Tavily (if keyed, datacenter-friendly) -> DDG HTML -> Wikipedia.
+    Returns (html, url)."""
+    tv = _tavily_search_html(task)
+    if tv:
+        return tv
     last_err = None
     for u in _search_fallbacks(task):
         try:
@@ -143,7 +185,7 @@ def _fetch_search(task: str) -> tuple[str, str]:
         except httpx.HTTPError as e:
             last_err = e
             continue
-    # All search engines blocked (e.g. datacenter IP) -> Wikipedia summary.
+    # All keyless engines blocked (e.g. datacenter IP) -> Wikipedia summary.
     wiki = _wikipedia_summary(task)
     if wiki:
         return f"<html><body>{wiki}</body></html>", "wikipedia-summary"
