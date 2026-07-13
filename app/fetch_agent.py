@@ -88,18 +88,22 @@ def _first_content_link(links: list[str], url: str) -> str | None:
 def _search_url(task: str) -> str:
     from urllib.parse import quote
 
-    # Primary: DuckDuckGo Lite (lightest, most datacenter-friendly HTML).
-    return f"https://lite.duckduckgo.com/lite/?q={quote(task)}"
+    # Primary search entry is handled by _fetch_search (engine fallback chain).
+    return f"https://html.duckduckgo.com/html/?q={quote(task)}"
 
 
 def _search_fallbacks(task: str) -> list[str]:
     from urllib.parse import quote
 
     q = quote(task)
+    # DuckDuckGo HTML is the only reliably-parseable keyless engine from
+    # datacenter IPs. Try it twice (transient blocks), then DDG Lite.
+    # Bing/Mojeek are intentionally excluded: their result links are not in
+    # plain <a href> markup, so the agent would loop forever on them.
     return [
-        f"https://lite.duckduckgo.com/lite/?q={q}",
         f"https://html.duckduckgo.com/html/?q={q}",
-        f"https://www.bing.com/search?q={q}",
+        f"https://html.duckduckgo.com/html/?q={q}",
+        f"https://lite.duckduckgo.com/lite/?q={q}",
     ]
 
 
@@ -111,8 +115,27 @@ def _fetch(url: str, timeout: float = 30.0) -> str:
     return r.text
 
 
+def _wikipedia_summary(task: str) -> str | None:
+    """Final keyless fallback: Wikipedia REST summary for the query topic."""
+    from urllib.parse import quote
+    try:
+        r = httpx.get(
+            f"https://en.wikipedia.org/api/rest_v1/page/summary/{quote(task)}",
+            timeout=20,
+            headers={"User-Agent": _UA},
+        )
+        if r.status_code == 200:
+            data = r.json()
+            extract = (data.get("extract") or "").strip()
+            if extract:
+                return f"{extract}\n\nSource: {data.get('content_urls', {}).get('desktop', {}).get('page', 'https://en.wikipedia.org')}"
+    except httpx.HTTPError:
+        return None
+    return None
+
+
 def _fetch_search(task: str) -> tuple[str, str]:
-    """Try each search engine until one responds. Returns (html, url_used)."""
+    """Try each search engine until one responds with HTML. Returns (html, url)."""
     last_err = None
     for u in _search_fallbacks(task):
         try:
@@ -120,7 +143,16 @@ def _fetch_search(task: str) -> tuple[str, str]:
         except httpx.HTTPError as e:
             last_err = e
             continue
+    # All search engines blocked (e.g. datacenter IP) -> Wikipedia summary.
+    wiki = _wikipedia_summary(task)
+    if wiki:
+        return f"<html><body>{wiki}</body></html>", "wikipedia-summary"
     raise httpx.HTTPError(f"all search engines failed (last: {last_err})")
+
+
+def _search_has_content(links: list[str], url: str) -> bool:
+    """True if the search page yielded at least one non-engine result link."""
+    return bool(_first_content_link(links, url))
 
 
 _SYSTEM = (
@@ -197,6 +229,12 @@ def run(task: str, start_url: str | None = None, max_steps: int = 8) -> dict:
         nxt = _resolve(nxt, url) if nxt else ""
         if decision.get("done") and answer:
             return {"result": answer, "steps": step + 1}
+        # On a search page with no usable content link, re-run the search chain
+        # (next engine, then Wikipedia fallback) instead of looping on it.
+        if not nxt and _is_search_page(url) and not _search_has_content(links, url):
+            url = None
+            is_search = True
+            continue
         if not nxt and _is_search_page(url):
             # LLM didn't pick a result -> follow the first real content link
             fb = _first_content_link(links, url)
