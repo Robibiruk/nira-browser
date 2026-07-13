@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: nira-browser
+    runtime: docker
+    plan: free          # 512MB — fetch backend only (no Chromium)
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    envVars:
+      - key: BROWSER_BACKEND
+        value: fetch
+      - key: OPENROUTER_API_KEY
+        sync: false      # set in Render dashboard
+      - key: OPENROUTER_MODEL
+        value: openai/gpt-4o-mini
+      - key: BROWSER_CORS_ORIGINS
+        value: "*"
