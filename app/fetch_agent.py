@@ -60,6 +60,31 @@ def _links(html: str, base: str) -> list[str]:
     return uniq[:40]
 
 
+_SEARCH_HOSTS = ("duckduckgo.com", "bing.com", "google.com", "search.yahoo", "search.brave")
+
+
+def _is_search_page(url: str) -> bool:
+    u = (url or "").lower()
+    return any(h in u for h in _SEARCH_HOSTS)
+
+
+def _first_content_link(links: list[str], url: str) -> str | None:
+    """From a search-results page, return the first link that is NOT the
+    search engine itself (so we actually leave the results page)."""
+    if not _is_search_page(url):
+        return None
+    for u in links:
+        lu = u.lower()
+        if any(h in lu for h in _SEARCH_HOSTS):
+            continue
+        if lu.startswith("javascript:") or lu.startswith("#") or lu.startswith("mailto:"):
+            continue
+        if lu.endswith(("png", "jpg", "jpeg", "gif", "svg", "css", "js")):
+            continue
+        return u
+    return None
+
+
 def _search_url(task: str) -> str:
     from urllib.parse import quote
 
@@ -172,6 +197,11 @@ def run(task: str, start_url: str | None = None, max_steps: int = 8) -> dict:
         nxt = _resolve(nxt, url) if nxt else ""
         if decision.get("done") and answer:
             return {"result": answer, "steps": step + 1}
+        if not nxt and _is_search_page(url):
+            # LLM didn't pick a result -> follow the first real content link
+            fb = _first_content_link(links, url)
+            if fb:
+                nxt = fb
         if nxt:
             url = nxt
             continue
