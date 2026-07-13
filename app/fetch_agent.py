@@ -104,11 +104,13 @@ _SYSTEM = (
     "To KEEP browsing: {\"done\": false, \"answer\": \"\", \"next_url\": \"<full http(s) URL from the page>\"}\n"
     "To FINISH: {\"done\": true, \"answer\": \"<concise answer to the task>\", \"next_url\": \"\"}\n"
     "Rules:\n"
-    "- If the current page already contains enough information to answer, set done:true with the answer.\n"
+    "- If the current page already contains enough information to answer, set done:true with the answer. DO NOT keep browsing a content page you already understand.\n"
     "- If you are on a search-results page, pick the single most relevant result link as next_url.\n"
     "- Only set next_url to a real http(s) link shown on the page. Never invent URLs.\n"
     "- Prefer content pages (articles, docs, product pages) over more search pages.\n"
-    "- Keep answers short and factual; cite the source URL if useful."
+    "- Once you reach ANY content page that is on-topic, answer from it rather than drilling deeper.\n"
+    "- Keep answers short and factual; cite the source URL if useful.\n"
+    "- You MUST answer by step 3 at the latest if the page is relevant — do not loop."
 )
 
 
@@ -117,7 +119,17 @@ def run(task: str, start_url: str | None = None, max_steps: int = 8) -> dict:
     url = start_url
     is_search = url is None  # first step is a search when no explicit URL
     last_text = ""
+    best_page = {"text": "", "url": "", "score": 0}
     fetch_failures = 0
+
+    def _score(text: str, u: str) -> int:
+        s = len(text)
+        low = (u or "").lower()
+        # search-result pages are poor answer sources
+        if any(k in low for k in ("/search", "duckduckgo", "bing.com/search", "google.com/search")):
+            s = 0
+        return s
+
     for step in range(max_steps):
         if url and url in visited:
             break
@@ -138,6 +150,9 @@ def run(task: str, start_url: str | None = None, max_steps: int = 8) -> dict:
         visited.add(url)
         text = extract.extract_text(html, url) or ""
         last_text = text
+        sc = _score(text, url)
+        if sc > best_page["score"]:
+            best_page = {"text": text, "url": url, "score": sc}
         links = _links(html, url)
         prompt = (
             f"USER TASK: {task}\n\nCURRENT URL: {url}\n\nPAGE TEXT:\n{text[:6000]}\n\n"
@@ -168,6 +183,19 @@ def run(task: str, start_url: str | None = None, max_steps: int = 8) -> dict:
                       f"Last page had {len(text)} chars of text.",
             "steps": step + 1,
         }
+    # Step limit reached without an answer: synthesize from the best content page.
+    if best_page["text"]:
+        try:
+            summary = chat(
+                "You are a research summarizer. Given a web page and a user task, "
+                "return a concise, factual answer (2-4 sentences) drawn ONLY from the page. "
+                "Cite the source URL if useful. If the page does not address the task, say so briefly.",
+                f"TASK: {task}\nSOURCE: {best_page['url']}\nPAGE TEXT:\n{best_page['text'][:6000]}",
+            )
+            if summary and summary.strip():
+                return {"result": summary.strip(), "steps": max_steps, "note": "summarized from best page"}
+        except Exception:
+            pass
     return {
         "result": f"Reached step limit ({max_steps}) without a final answer. "
                   f"Last URL: {url}",
