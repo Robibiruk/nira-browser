@@ -63,7 +63,39 @@ def _links(html: str, base: str) -> list[str]:
 def _search_url(task: str) -> str:
     from urllib.parse import quote
 
-    return f"https://html.duckduckgo.com/html/?q={quote(task)}"
+    # Primary: DuckDuckGo Lite (lightest, most datacenter-friendly HTML).
+    return f"https://lite.duckduckgo.com/lite/?q={quote(task)}"
+
+
+def _search_fallbacks(task: str) -> list[str]:
+    from urllib.parse import quote
+
+    q = quote(task)
+    return [
+        f"https://lite.duckduckgo.com/lite/?q={q}",
+        f"https://html.duckduckgo.com/html/?q={q}",
+        f"https://www.bing.com/search?q={q}",
+    ]
+
+
+_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+
+
+def _fetch(url: str, timeout: float = 30.0) -> str:
+    r = httpx.get(url, follow_redirects=True, timeout=timeout, headers={"User-Agent": _UA})
+    return r.text
+
+
+def _fetch_search(task: str) -> tuple[str, str]:
+    """Try each search engine until one responds. Returns (html, url_used)."""
+    last_err = None
+    for u in _search_fallbacks(task):
+        try:
+            return _fetch(u), u
+        except httpx.HTTPError as e:
+            last_err = e
+            continue
+    raise httpx.HTTPError(f"all search engines failed (last: {last_err})")
 
 
 _SYSTEM = (
@@ -82,18 +114,28 @@ _SYSTEM = (
 
 def run(task: str, start_url: str | None = None, max_steps: int = 8) -> dict:
     visited: set[str] = set()
-    url = start_url or _search_url(task)
+    url = start_url
+    is_search = url is None  # first step is a search when no explicit URL
     last_text = ""
+    fetch_failures = 0
     for step in range(max_steps):
-        if url in visited:
+        if url and url in visited:
             break
-        visited.add(url)
         try:
-            r = httpx.get(url, follow_redirects=True, timeout=20,
-                          headers={"User-Agent": "Mozilla/5.0 (compatible; NIRABrowser/1.0)"})
-            html = r.text
+            if is_search:
+                html, url = _fetch_search(task)
+                is_search = False
+            else:
+                html = _fetch(url)
         except httpx.HTTPError as e:
-            return {"result": f"Failed to fetch {url}: {e}", "steps": step + 1}
+            fetch_failures += 1
+            if fetch_failures >= 3 or not visited:
+                return {"result": f"Failed to fetch {url or 'search'}: {e}", "steps": step + 1}
+            # skip this page, try to continue from a search next time
+            url = None
+            is_search = True
+            continue
+        visited.add(url)
         text = extract.extract_text(html, url) or ""
         last_text = text
         links = _links(html, url)
