@@ -11,6 +11,19 @@ from app.agent import browse
 
 app = FastAPI(title="NIRA Browser Service")
 
+
+@app.get("/")
+def root():
+    return {"status": "ok", "service": "NIRA Browser"}
+
+
+@app.head("/")
+def root_head():
+    # UptimeRobot probes `HEAD /`; FastAPI does not auto-derive HEAD here,
+    # so respond 200 with no body to keep the monitor green.
+    return
+
+
 _allowed = os.getenv("BROWSER_CORS_ORIGINS", "*").split(",")
 app.add_middleware(
     CORSMiddleware,
