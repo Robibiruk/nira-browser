@@ -3,13 +3,24 @@ from __future__ import annotations
 
 import os
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from app.agent import browse
 
 app = FastAPI(title="NIRA Browser Service")
+
+
+@app.get("/")
+async def root():
+    return {"status": "ok", "service": "NIRA Browser"}
+
+
+@app.head("/", include_in_schema=False)
+async def root_head():
+    return Response(status_code=200)
+
 
 _allowed = os.getenv("BROWSER_CORS_ORIGINS", "*").split(",")
 app.add_middleware(
